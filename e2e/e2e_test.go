@@ -183,9 +183,10 @@ func (suite *E2ETestSuite) TestDexLogin() {
 	require.Nil(t, err)
 	require.Equal(t, http.StatusFound, resp.StatusCode)
 
-	// Get state value
+	// Get state cookie
 	t.Log("Getting endpoint")
 	authCodeURL := appURL.ResolveReference(mustParseURL(resp.Header.Get("Location")))
+	stateCookie := resp.Cookies()
 
 	// Start OIDC Flow by hitting the authorization endpoint
 	resp, err = client.Get(authCodeURL.String())
@@ -217,7 +218,13 @@ func (suite *E2ETestSuite) TestDexLogin() {
 
 	// Get Authorization Code and call the AuthService's redirect url
 	oidcRedirectURL := resp.Request.URL.ResolveReference(mustParseURL(resp.Header.Get("Location")))
-	resp, err = client.Get(oidcRedirectURL.String())
+	req, err = http.NewRequest(http.MethodGet, oidcRedirectURL.String(), nil)
+	require.Nil(t, err)
+	// Add cookie for state CSRF
+	for _, c := range stateCookie {
+		req.AddCookie(c)
+	}
+	resp, err = client.Do(req)
 	require.Nil(t, err)
 	require.Equal(t, http.StatusFound, resp.StatusCode)
 
@@ -327,7 +334,7 @@ func createK3DCluster() error {
 	// FIXME: Prefer creating a cluster with a random name. Else, try to remove
 	// the cluster before creating it.
 	cmd := exec.Command("k3d", "cluster", "create", "e2e-test-cluster", "--k3s-server-arg",
-	    "--no-deploy=traefik", "--no-lb", "--wait", "--timeout", "5m",
+		"--no-deploy=traefik", "--no-lb", "--wait", "--timeout", "5m",
 		"--update-default-kubeconfig=false")
 	cmd.Stderr, cmd.Stdout = os.Stderr, os.Stdout
 	err := cmd.Run()

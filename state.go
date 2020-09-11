@@ -1,67 +1,81 @@
 // Copyright © 2019 Arrikto Inc.  All Rights Reserved.
+//
+// Utils related to handling the OIDC state parameter
+// for CSRF.
 
 package main
 
 import (
-	"github.com/gorilla/sessions"
-	"github.com/pkg/errors"
 	"net/http"
-	"net/http/httptest"
 	"time"
+
+	"github.com/gorilla/securecookie"
+	"github.com/pkg/errors"
 )
 
-const oidcLoginSessionCookie = "non_existent_cookie"
+const (
+	oauthStateCookie = "oidc_state_csrf"
+)
 
-type state struct {
-	origURL string
+var secureCookie = securecookie.New(
+	// Hash Key
+	securecookie.GenerateRandomKey(64),
+	// Encryption Key
+	securecookie.GenerateRandomKey(32),
+)
+
+type State struct {
+	// FirstVisitedURL is the URL that the user visited when we redirected them
+	// to login.
+	FirstVisitedURL string
 }
 
-func newState(origURL string) *state {
-	return &state{
-		origURL: origURL,
+func newState(firstVisitedURL string) *State {
+	return &State{
+		FirstVisitedURL: firstVisitedURL,
 	}
 }
 
-// load retrieves a state from the store given its id.
-func load(store sessions.Store, id string) (*state, error) {
-	// Make a fake request so that the store will find the cookie
-	r := &http.Request{Header: make(http.Header)}
-	r.AddCookie(&http.Cookie{Name: oidcLoginSessionCookie, Value: id, MaxAge: 10})
-
-	session, err := store.Get(r, oidcLoginSessionCookie)
+func initState(r *http.Request, w http.ResponseWriter) (string, error) {
+	state := newState(r.URL.String())
+	encoded, err := secureCookie.Encode(oauthStateCookie, state)
 	if err != nil {
-		return nil, errors.WithStack(err)
+		return "", errors.Wrap(err, "Failed to save state in encrypted cookie.")
 	}
-	if session.IsNew {
-		return nil, errors.New("session does not exist")
+	cookie := &http.Cookie{
+		Name:     oauthStateCookie,
+		Value:    encoded,
+		Path:     "/",
+		HttpOnly: true,
+		MaxAge:   int(20 * time.Minute),
 	}
-
-	return &state{
-		origURL: session.Values["origURL"].(string),
-	}, nil
+	http.SetCookie(w, cookie)
+	return encoded, nil
 }
 
-// save persists a state to the store and returns the entry's id.
-func (s *state) save(store sessions.Store) (string, error) {
-	session := sessions.NewSession(store, oidcLoginSessionCookie)
-	session.ID = createNonce(16)
-	session.Options.MaxAge = int(time.Hour)
-	session.Values["origURL"] = s.origURL
+func verifyState(r *http.Request) (*State, error) {
+	// Get state from cookie and http param and:
+	// 1. Confirm the two values match.
+	// 2. Confirm we issued the state value by decoding it.
+	// 2. Get the original URL associated with the state value.
+	var stateParam = r.FormValue("state")
+	if len(stateParam) == 0 {
+		return nil, errors.New("Missing url parameter: state")
+	}
 
-	// The current gorilla/sessions Store interface doesn't allow us
-	// to set the session ID.
-	// Because of that, we have to retrieve it from the cookie value.
-	w := httptest.NewRecorder()
-	err := session.Save(&http.Request{}, w)
+	// If state is loaded, then it's correct, as it is saved by its id.
+	stateCookie, err := r.Cookie(oauthStateCookie)
 	if err != nil {
-		return "", errors.Wrap(err, "error trying to save session")
+		return nil, errors.Errorf("Missing cookie: '%s'", oauthStateCookie)
 	}
-	// Cookie is persisted in ResponseWriter, make a request to parse it.
-	r := &http.Request{Header: make(http.Header)}
-	r.Header.Set("Cookie", w.Header().Get("Set-Cookie"))
-	c, err := r.Cookie(oidcLoginSessionCookie)
+	if stateParam != stateCookie.Value {
+		return nil, errors.New("State value from http params doesn't match value in cookie. Possible CSRF attack.")
+	}
+
+	var state *State
+	err = secureCookie.Decode(oauthStateCookie, stateParam, &state)
 	if err != nil {
-		return "", errors.Wrap(err, "error trying to save session")
+		return nil, errors.Wrap(err, "Failed to decode oauth state parameter.")
 	}
-	return c.Value, nil
+	return state, nil
 }
