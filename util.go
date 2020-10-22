@@ -73,6 +73,9 @@ func deleteCookie(w http.ResponseWriter, name string) {
 }
 
 func createNonce(length int) (string, error) {
+	// XXX: To avoid modulo bias, 256 / len(nonceChars) MUST equal 0.
+	// In this case, 256 / 64 = 0. See:
+	// https://research.kudelskisecurity.com/2020/07/28/the-definitive-guide-to-modulo-bias-and-how-to-avoid-it/
 	const nonceChars = "abcdefghijklmnopqrstuvwxyz:ABCDEFGHIJKLMNOPQRSTUVWXYZ-0123456789"
 	nonce := make([]byte, length)
 	if _, err := rand.Read(nonce); err != nil {
